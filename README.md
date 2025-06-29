@@ -150,11 +150,3 @@ Guilherme Henrique Pereira
 
 📄 Licença
 Este projeto está sob a licença MIT. Consulte o arquivo LICENSE para mais detalhes.
-
-yaml
-Copiar
-Editar
-
----
-
-Se você quiser, posso também te ajudar a gerar um `requirements.txt`, o `.env.example`, ou montar um # Assistente-de-IA-para-Busca-de-Empregos

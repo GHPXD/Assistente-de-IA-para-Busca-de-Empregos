@@ -42,11 +42,11 @@ with st.sidebar:
         cidades = st.text_input("Cidades (separadas por vírgula)", placeholder="Ex: São Paulo, Curitiba")
     pontuacao_minima = st.slider("Pontuação Mínima de Compatibilidade", 1, 10, 5)
 
-    # 4. Configurações de Rede (NOVO E IMPORTANTE)
+    # 4. Configurações de Rede
     st.markdown("**4. Configurações de Rede**")
     desativar_ssl = st.checkbox(
         "Desativar verificação SSL",
-        value=True, # Deixando como padrão para já funcionar no seu caso
+        value=True,
         help="Marque esta opção se estiver em uma rede corporativa ou de faculdade que bloqueia conexões. Isso resolve erros de 'CERTIFICATE_VERIFY_FAILED'."
     )
 

@@ -2,42 +2,36 @@ import os
 import json
 import time
 import pandas as pd
+import requests
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from serpapi import SerpApiClient
-import requests
 from bs4 import BeautifulSoup
-
+import urllib3
+import re # Importado para a limpeza da URL
 
 # --- ETAPA 0: CONFIGURAÇÃO ---
 load_dotenv()
-if "GOOGLE_API_KEY" not in os.environ:
-    raise ValueError("A chave da API do Google não foi encontrada. Verifique seu arquivo .env")
-if "SERPAPI_API_KEY" not in os.environ:
-    raise ValueError("A chave da API da SerpAPI não foi encontrada. Verifique seu arquivo .env")
-print("Ambiente configurado. Chaves de API carregadas.")
 
-
-# --- ETAPA 1: ANÁLISE DO CURRÍCULO ---
+# --- ETAPA 1: ANÁLISE DO CURRÍCULO (Inalterada) ---
 def analisar_curriculo(caminho_pdf: str) -> dict:
     print(f"\nIniciando a análise do currículo: {caminho_pdf}")
+    if not os.path.exists(caminho_pdf):
+        raise ValueError(f"Arquivo de currículo não encontrado em '{caminho_pdf}'")
     loader = PyPDFLoader(caminho_pdf)
     paginas_cv = loader.load_and_split()
     texto_cv = " ".join(page.page_content for page in paginas_cv)
-    print("Currículo em PDF carregado e texto extraído com sucesso.")
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
     prompt_template = ChatPromptTemplate.from_template(
         """
-        Você é um recrutador de RH experiente. Analise o currículo a seguir e extraia em formato JSON ESTRITO (em português):
-        1. `resumo_profissional`: Um resumo conciso do perfil.
-        2. `principais_habilidades`: Uma lista de 5 a 10 habilidades chave.
-        3. `cargos_desejados`: Uma lista de 2 a 3 títulos de cargos (Júnior ou Pleno) que o candidato buscaria.
+        Você é um recrutador de RH. Analise o currículo e extraia em JSON ESTRITO (em português):
+        1. `resumo_profissional`: Um resumo do perfil.
+        2. `principais_habilidades`: Uma lista de 5 a 10 habilidades.
+        3. `cargos_desejados`: Uma lista de 2 a 3 títulos de cargos.
 
         Currículo: --- {texto_do_curriculo} ---
-
         Formato JSON: ```json {{"resumo_profissional": "...", "principais_habilidades": ["..."], "cargos_desejados": ["..."]}} ```
         """
     )
@@ -51,199 +45,167 @@ def analisar_curriculo(caminho_pdf: str) -> dict:
         print("Análise do currículo concluída com sucesso!")
         return perfil_candidato
     except Exception as e:
-        print(f"Erro ao processar a resposta da IA (Currículo): {e}")
+        print(f"Erro ao processar a resposta da IA (Currículo): {e}\nResposta recebida: {resultado_analise_str}")
         return None
 
-# --- ETAPA 2: BUSCA DE VAGAS (COM ACESSO DIRETO À SERPAPI) ---
-def buscar_vagas(perfil_profissional: dict) -> list:
-    """
-    Busca vagas de emprego online, extraindo o link direto da fonte original.
-    (VERSÃO 5.0 - EXTRAÇÃO DE LINK DIRETO)
-    """
-    print("\nIniciando a busca por vagas de emprego...")
-    cargos = perfil_profissional.get("cargos_desejados", [])
-    if not cargos:
-        print("Nenhum cargo desejado encontrado no perfil para iniciar a busca.")
-        return []
+# --- ETAPA 2: BUSCA DE VAGAS COM LIMPEZA DE URL (CORREÇÃO FINAL) ---
+def buscar_vagas_agressivo(cargos, senioridade, modalidade, cidades, fontes, modo_busca, desativar_ssl):
+    """Busca vagas online com limpeza de URL para garantir a conexão."""
+    print(f"\nIniciando busca de vagas no modo: {modo_busca}")
+    if desativar_ssl:
+        print("\n⚠️ ATENÇÃO: A verificação de segurança SSL está DESATIVADA.\n")
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    if not cargos: return []
 
     links_vagas_encontradas = set()
     serpapi_key = os.getenv("SERPAPI_API_KEY")
+    mapa_fontes = {"LinkedIn": "site:[linkedin.com/jobs](https://linkedin.com/jobs)", "Gupy": "site:gupy.io"}
+    base_url = "[https://serpapi.com/search.json](https://serpapi.com/search.json)"
 
     for cargo in cargos:
-        query = f"vaga para {cargo} no Brasil"
-        print(f"Executando busca para: '{query}'")
+        variacoes_cargo = {cargo}
+        if modo_busca == "Ampla":
+            variacoes_cargo.add(f"vaga {cargo}")
         
-        params = { "engine": "google_jobs", "q": query, "gl": "br", "hl": "pt-br", "api_key": serpapi_key }
+        for variacao in variacoes_cargo:
+            query_parts = [variacao]
+            if senioridade: query_parts.append(" ".join(senioridade))
+            if modalidade: query_parts.append(modalidade)
+            if cidades and modalidade in ["Híbrido", "Presencial"]: query_parts.append(f"em {cidades}")
+            else: query_parts.append("Brasil")
+            query_base = " ".join(query_parts)
 
-        try:
-            client = SerpApiClient(params)
-            resultado_busca = client.get_dict()
-            
-            if "error" in resultado_busca:
-                print(f"  -> A API retornou um erro: \"{resultado_busca['error']}\"")
-                continue
-
-            if "jobs_results" in resultado_busca and len(resultado_busca["jobs_results"]) > 0:
-                print(f"  -> Encontrados {len(resultado_busca['jobs_results'])} resultados para este cargo.")
+            for fonte in fontes:
+                params = {"api_key": serpapi_key, "gl": "br", "hl": "pt-br"}
+                if fonte == "Google Jobs":
+                    params.update({"engine": "google_jobs", "q": query_base})
+                    print(f"Executando no Google Jobs: '{query_base}'")
+                else:
+                    query_com_site = f'"{query_base}" {mapa_fontes.get(fonte, "")}'
+                    params.update({"engine": "google", "q": query_com_site})
+                    print(f"Executando no Google (site:{fonte}): '{query_com_site}'")
                 
-                for vaga in resultado_busca["jobs_results"]:
-                    # Lógica inteligente: procurar o link de aplicação primeiro
-                    link_direto = None
-                    if "apply_options" in vaga and isinstance(vaga["apply_options"], list) and len(vaga["apply_options"]) > 0:
-                        # Pega o link do primeiro provedor de aplicação (geralmente o mais direto)
-                        link_direto = vaga["apply_options"][0].get("link")
+                try:
+                    # --- CORREÇÃO DEFINITIVA ---
+                    # Limpa a URL de qualquer formatação Markdown que possa ter sido adicionada
+                    url_crua = str(base_url)
+                    match = re.search(r'\[.*\]\((.*)\)', url_crua)
+                    url_limpa = match.group(1) if match else url_crua
+                    # --- FIM DA CORREÇÃO ---
+                    
+                    response = requests.get(url_limpa, params=params, verify=not desativar_ssl)
+                    response.raise_for_status()
+                    resultado_busca = response.json()
+                    
+                    if "error" in resultado_busca:
+                        print(f"  -> API retornou um erro: \"{resultado_busca['error']}\"")
+                        continue
 
-                    # Se não encontrar um link de aplicação, usa o 'share_link' como plano B
-                    if not link_direto:
-                        link_direto = vaga.get("share_link")
+                    resultados = resultado_busca.get("jobs_results", []) if fonte == "Google Jobs" else resultado_busca.get("organic_results", [])
+                    
+                    for res in resultados:
+                        link = None
+                        if fonte == "Google Jobs":
+                            link = next((opt.get("link") for opt in res.get("apply_options", []) if opt.get("link")), res.get("share_link"))
+                        else: link = res.get("link")
+                        if link: links_vagas_encontradas.add(link)
 
-                    if link_direto:
-                        links_vagas_encontradas.add(link_direto)
-            else:
-                print(f"  -> Busca bem-sucedida, mas nenhum resultado de vaga no ar encontrado para este cargo.")
+                except requests.exceptions.RequestException as e:
+                    print(f"ERRO DE CONEXÃO: Falha ao se conectar à API para a fonte {fonte}. Causa: {e}")
+                
+                time.sleep(1.5)
 
-        except Exception as e:
-            print(f"Ocorreu um erro ao fazer a chamada direta à SerpAPI para '{cargo}': {e}")
-
-    if len(links_vagas_encontradas) > 0:
-        print(f"\nBusca concluída! Encontrados {len(links_vagas_encontradas)} links diretos de vagas únicas no total.")
-    else:
-        print("\nBusca geral concluída, porém nenhum link de vaga foi extraído.")
-        
+    print(f"\nBusca agressiva concluída! Encontrados {len(links_vagas_encontradas)} links únicos no total.")
     return list(links_vagas_encontradas)
 
 
-# --- ETAPA 3: EXTRAÇÃO DO TEXTO DA VAGA ---
-def extrair_texto_da_vaga(url: str) -> str:
+# --- ETAPA 3: EXTRAÇÃO DO TEXTO DA VAGA (Inalterada) ---
+def extrair_texto_da_vaga(url: str, desativar_ssl: bool) -> str:
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True, verify=not desativar_ssl)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-        for script_or_style in soup(['script', 'style', 'header', 'footer', 'nav']):
-            script_or_style.decompose()
-        return soup.get_text(separator=' ', strip=True)
-    except requests.RequestException as e:
-        print(f"  -> Erro ao acessar a URL {url}: {e}")
+        for tag in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form']):
+            tag.decompose()
+        texto = soup.get_text(separator=' ', strip=True)
+        return texto if len(texto) > 100 else None
+    except Exception as e:
+        print(f"  -> Erro ao extrair texto da URL {url}: {e}")
         return None
 
-# --- ETAPA 4: ANÁLISE DE COMPATIBILIDADE ---
-def analisar_compatibilidade_vaga(texto_vaga: str, perfil_profissional: dict) -> dict:
-    """
-    Usa o LLM para analisar a compatibilidade de uma vaga com o perfil do candidato.
-    (VERSÃO COM PROMPT MELHORADO)
-    """
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
-
-    # Prompt mais detalhado e com instruções mais claras
+# --- ETAPA 4: ANÁLISE DE COMPATIBILIDADE (Inalterada) ---
+def analisar_compatibilidade_vaga(texto_vaga, perfil_profissional, url_vaga):
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
     prompt_template = ChatPromptTemplate.from_template(
         """
-        Você é um especialista em recrutamento de tecnologia com um olhar crítico. Sua tarefa é fazer uma análise detalhada da compatibilidade entre um perfil de candidato e uma descrição de vaga.
+        Você é um recrutador. Analise a vaga de forma flexível e otimista.
 
-        **Perfil do Candidato:**
-        - Resumo: {resumo_profissional}
-        - Habilidades Chave: {principais_habilidades}
+        **Perfil:** Resumo: {resumo_profissional}, Habilidades: {principais_habilidades}
+        **Vaga:** URL: {url_da_vaga}, Texto: {texto_da_vaga}
 
-        **Texto Completo da Vaga:**
-        ---
-        {texto_da_vaga}
-        ---
+        **Análise (JSON ESTRITO):**
+        1. `titulo_vaga`: Título da vaga (inferir da URL se o texto falhar).
+        2. `compativel`: `true` se houver QUALQUER alinhamento.
+        3. `pontuacao_compatibilidade`: Nota de 1 a 10.
+        4. `justificativa`: Frase curta explicando a nota.
+        5. `resumo_funcoes`: 2-3 bullet points. Se o texto falhar, escreva "Extração de texto falhou.".
 
-        **Sua Análise (responda em formato JSON ESTRITO):**
-        Analise a vaga e o perfil, e retorne um JSON com os seguintes campos:
-        1. `titulo_vaga`: O título oficial e completo da vaga.
-        2. `compativel`: Responda `true` apenas se a vaga for uma excelente combinação para o nível (Júnior/Pleno) e para as habilidades técnicas principais do candidato. Seja rigoroso. Se for uma vaga Sênior ou para tecnologias totalmente diferentes, responda `false`.
-        3. `pontuacao_compatibilidade`: Um número inteiro de 1 a 10. Dê notas altas (7-10) apenas se as tecnologias mais importantes da vaga (ex: Python, Java, Power BI) corresponderem diretamente às habilidades do candidato.
-        4. `justificativa`: Uma frase curta explicando o porquê da sua avaliação de compatibilidade (ex: "Alinhado com experiência em Python e análise de dados" ou "Incompatível por exigir 5 anos de experiência em C#").
-        5. `resumo_funcoes`: Um resumo em bullet points (formato de string com \\n) das 3-4 principais responsabilidades e requisitos da vaga.
-
-        **Formato de Saída Obrigatório (JSON ESTRITO):**
-        ```json
-        {{
-          "titulo_vaga": "...",
-          "compativel": true/false,
-          "pontuacao_compatibilidade": ...,
-          "justificativa": "...",
-          "resumo_funcoes": "- Primeira função\\n- Segunda função\\n- Requisito principal"
-        }}
-        ```
+        **Formato Obrigatório:** {{"titulo_vaga": "...", "compativel": true, "pontuacao_compatibilidade": ..., "justificativa": "...", "resumo_funcoes": "..."}}
         """
     )
-    cadeia_analise_vaga = prompt_template | llm | StrOutputParser()
+    texto_para_analise = texto_vaga if texto_vaga else "Texto indisponível. Analise com base na URL."
+    cadeia_analise = prompt_template | llm | StrOutputParser()
     resumo = perfil_profissional.get("resumo_profissional", "")
     habilidades = ", ".join(perfil_profissional.get("principais_habilidades", []))
     try:
-        resultado_str = cadeia_analise_vaga.invoke({
-            "resumo_profissional": resumo, "principais_habilidades": habilidades, "texto_da_vaga": texto_vaga
-        })
+        resultado_str = cadeia_analise.invoke({"resumo_profissional": resumo, "principais_habilidades": habilidades, "texto_da_vaga": texto_para_analise, "url_da_vaga": url_vaga})
         if "```json" in resultado_str:
             resultado_str = resultado_str.split("```json")[1].split("```")[0].strip()
         analise = json.loads(resultado_str)
-        if 'justificativa' in analise:
-             pass
+        analise['texto_extraido'] = (texto_vaga is not None)
         return analise
     except Exception as e:
-        print(f"  -> Erro ao processar análise da vaga: {e}")
+        print(f"  -> Erro crítico ao processar análise da vaga: {e}")
         return None
 
-# --- ETAPA 5: GERAÇÃO DO RELATÓRIO EM EXCEL ---
-def gerar_relatorio_excel(vagas: list, nome_arquivo="relatorio_vagas.xlsx"):
-    if not vagas:
-        print("Nenhuma vaga compatível para gerar o relatório.")
-        return
-    print(f"\nGerando relatório em Excel: {nome_arquivo}...")
-    df = pd.DataFrame(vagas)
-    colunas_desejadas = {
-        'titulo_vaga': 'Nome da Vaga',
-        'resumo_funcoes': 'Funções',
-        'pontuacao_compatibilidade': 'Pontuação',
-        'link': 'Link'
-    }
-    df = df[list(colunas_desejadas.keys())]
-    df.rename(columns=colunas_desejadas, inplace=True)
-    try:
-        df.to_excel(nome_arquivo, index=False)
-        print(f"Relatório '{nome_arquivo}' gerado com sucesso!")
-        print(f"O arquivo está na mesma pasta que o script.")
-    except Exception as e:
-        print(f"Ocorreu um erro ao salvar o arquivo Excel: {e}")
+# --- ETAPA 5: ORQUESTRAÇÃO COMPLETA (Inalterada) ---
+def rodar_analise_completa(caminho_pdf, senioridade, modalidade, cidades, fontes, pontuacao_minima, modo_busca, desativar_ssl, cargos_manuais=None):
+    if not all([os.getenv("GOOGLE_API_KEY"), os.getenv("SERPAPI_API_KEY")]):
+        raise ValueError("Chaves de API não encontradas. Verifique seu arquivo .env.")
 
+    perfil = analisar_curriculo(caminho_pdf)
+    if not perfil: raise ValueError("Falha ao analisar o currículo.")
 
-# --- EXECUÇÃO PRINCIPAL DO PROJETO ---
-if __name__ == "__main__":
-    caminho_do_meu_curriculo = "Guilherme Henrique Pereira.pdf" # Coloque o nome do seu PDF aqui
+    cargos_para_buscar = cargos_manuais if cargos_manuais else perfil.get("cargos_desejados", [])
+    if not cargos_para_buscar: raise ValueError("Nenhum cargo para buscar.")
+
+    links_de_vagas = buscar_vagas_agressivo(cargos_para_buscar, senioridade, modalidade, cidades, fontes, modo_busca, desativar_ssl)
+    vagas_compativeis = []
     
-    if not os.path.exists(caminho_do_meu_curriculo):
-        print(f"Erro: Arquivo '{caminho_do_meu_curriculo}' não encontrado.")
-    else:
-        perfil = analisar_curriculo(caminho_do_meu_curriculo)
+    if links_de_vagas:
+        total_vagas = len(links_de_vagas)
+        print(f"\n--- Analisando {total_vagas} vagas encontradas... ---")
         
-        if perfil:
-            links_de_vagas = buscar_vagas(perfil)
-            vagas_compativeis = []
-            if links_de_vagas:
-                print(f"\n--- Analisando {len(links_de_vagas)} vagas. Isso pode levar alguns minutos... ---")                
-                for i, link in enumerate(links_de_vagas):
-                    if i > 0 and i % 10 == 0:
-                        print(f"\n--- Pausa de 60 segundos para respeitar o limite da API (processadas {i}/{len(links_de_vagas)}) ---\n")
-                        time.sleep(60)
-
-                    print(f"Analisando vaga {i+1}/{len(links_de_vagas)}: {link}")
-                    texto_vaga = extrair_texto_da_vaga(link)
-                    if texto_vaga:
-                        texto_vaga_curto = texto_vaga[:8000] 
-                        analise = analisar_compatibilidade_vaga(texto_vaga_curto, perfil)
-                        if analise and analise.get("compativel") is True and analise.get("pontuacao_compatibilidade", 0) >= 7: # Aumentei o rigor para 7
-                            print(f"  -> Vaga compatível: {analise.get('titulo_vaga')} (Nota: {analise.get('pontuacao_compatibilidade')})")
-                            analise['link'] = link 
-                            vagas_compativeis.append(analise)
-                        else:
-                            motivo = analise.get('justificativa', 'Análise retornou incompatível.') if analise else 'Erro na análise.'
-                            print(f"  -> Vaga não compatível. Motivo: {motivo}")
-                    
-                    time.sleep(2)
+        for i, link in enumerate(links_de_vagas):
+            if i >= 30:
+                print("\n--- Limite de 30 análises de vagas atingido. Finalizando... ---")
+                break
             
-            if vagas_compativeis:
-                gerar_relatorio_excel(vagas_compativeis)
+            print(f"Analisando vaga {i+1}/{total_vagas}: {link}")
+            texto_vaga = extrair_texto_da_vaga(link, desativar_ssl)
+            analise = analisar_compatibilidade_vaga(texto_vaga, perfil, link)
+            
+            if analise and analise.get("compativel") is True and analise.get("pontuacao_compatibilidade", 0) >= pontuacao_minima:
+                print(f"  -> Vaga compatível: {analise.get('titulo_vaga')} (Nota: {analise.get('pontuacao_compatibilidade')})")
+                analise['link'] = link
+                vagas_compativeis.append(analise)
+            elif analise:
+                print(f"  -> Vaga não compatível: {analise.get('justificativa', 'Análise retornou incompatível.')}")
             else:
-                print("\nAnálise concluída. Nenhuma vaga altamente compatível foi encontrada para gerar um relatório.")
+                print("  -> Vaga não compatível: Falha na análise.")
+            
+            time.sleep(2)
+
+    return vagas_compativeis

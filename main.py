@@ -10,12 +10,12 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from bs4 import BeautifulSoup
 import urllib3
-import re # Importado para a limpeza da URL
+import re
 
 # --- ETAPA 0: CONFIGURAÇÃO ---
 load_dotenv()
 
-# --- ETAPA 1: ANÁLISE DO CURRÍCULO (Inalterada) ---
+# --- ETAPA 1: ANÁLISE DO CURRÍCULO ---
 def analisar_curriculo(caminho_pdf: str) -> dict:
     print(f"\nIniciando a análise do currículo: {caminho_pdf}")
     if not os.path.exists(caminho_pdf):
@@ -48,7 +48,7 @@ def analisar_curriculo(caminho_pdf: str) -> dict:
         print(f"Erro ao processar a resposta da IA (Currículo): {e}\nResposta recebida: {resultado_analise_str}")
         return None
 
-# --- ETAPA 2: BUSCA DE VAGAS COM LIMPEZA DE URL (CORREÇÃO FINAL) ---
+# --- ETAPA 2: BUSCA DE VAGAS COM LIMPEZA DE URL ---
 def buscar_vagas_agressivo(cargos, senioridade, modalidade, cidades, fontes, modo_busca, desativar_ssl):
     """Busca vagas online com limpeza de URL para garantir a conexão."""
     print(f"\nIniciando busca de vagas no modo: {modo_busca}")
@@ -87,8 +87,6 @@ def buscar_vagas_agressivo(cargos, senioridade, modalidade, cidades, fontes, mod
                     print(f"Executando no Google (site:{fonte}): '{query_com_site}'")
                 
                 try:
-                    # --- CORREÇÃO DEFINITIVA ---
-                    # Limpa a URL de qualquer formatação Markdown que possa ter sido adicionada
                     url_crua = str(base_url)
                     match = re.search(r'\[.*\]\((.*)\)', url_crua)
                     url_limpa = match.group(1) if match else url_crua
@@ -120,7 +118,7 @@ def buscar_vagas_agressivo(cargos, senioridade, modalidade, cidades, fontes, mod
     return list(links_vagas_encontradas)
 
 
-# --- ETAPA 3: EXTRAÇÃO DO TEXTO DA VAGA (Inalterada) ---
+# --- ETAPA 3: EXTRAÇÃO DO TEXTO DA VAGA ---
 def extrair_texto_da_vaga(url: str, desativar_ssl: bool) -> str:
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -135,7 +133,7 @@ def extrair_texto_da_vaga(url: str, desativar_ssl: bool) -> str:
         print(f"  -> Erro ao extrair texto da URL {url}: {e}")
         return None
 
-# --- ETAPA 4: ANÁLISE DE COMPATIBILIDADE (Inalterada) ---
+# --- ETAPA 4: ANÁLISE DE COMPATIBILIDADE ---
 def analisar_compatibilidade_vaga(texto_vaga, perfil_profissional, url_vaga):
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
     prompt_template = ChatPromptTemplate.from_template(
@@ -170,7 +168,7 @@ def analisar_compatibilidade_vaga(texto_vaga, perfil_profissional, url_vaga):
         print(f"  -> Erro crítico ao processar análise da vaga: {e}")
         return None
 
-# --- ETAPA 5: ORQUESTRAÇÃO COMPLETA (Inalterada) ---
+# --- ETAPA 5: ORQUESTRAÇÃO COMPLETA ---
 def rodar_analise_completa(caminho_pdf, senioridade, modalidade, cidades, fontes, pontuacao_minima, modo_busca, desativar_ssl, cargos_manuais=None):
     if not all([os.getenv("GOOGLE_API_KEY"), os.getenv("SERPAPI_API_KEY")]):
         raise ValueError("Chaves de API não encontradas. Verifique seu arquivo .env.")
